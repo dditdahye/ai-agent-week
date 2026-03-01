@@ -9,7 +9,7 @@ from .llm_client import parse_with_retry
 
 from .config import MODEL_NAME, MAX_TASK_CHARS
 
-MAX_TASK_CHARS = 20000  # ✅ 실무 가드레일(원하면 조정)
+MAX_TASK_CHARS = 20000  # 실무 가드레일(원하면 조정)
 
 
 def planner(task: str) -> list[str]:
@@ -65,7 +65,7 @@ def run_agent(task: str) -> dict:
 
     latency_ms = int((time.time() - t0) * 1000)
 
-    # ✅ 구조화 로그(간단 버전)
+    # 구조화 로그(간단 버전)
     print(json.dumps({
         "event": "agent_run",
         "request_id": request_id,

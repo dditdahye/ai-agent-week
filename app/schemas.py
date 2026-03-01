@@ -25,3 +25,7 @@ class RAGAnswerResponse(BaseModel):
     answer: str
     summary_3lines: List[str]
     citations: List[Citation]
+
+class RAGLLMOut(BaseModel):
+    answer: str
+    summary_3lines: List[str]

@@ -8,6 +8,7 @@ from app.rag.store import add_documents, search, split_text
 from app.service import summarize, rag_answer
 from app.config import RAG_DIST_THRESHOLD
 from app.schemas import RAGRequest, RAGAnswerResponse
+from app.llm_client import rag_answer_with_summary
 
 import os
 
@@ -19,11 +20,42 @@ class AgentRunRequest(BaseModel):
 class RAGRequest(BaseModel):
     question: str
 
+def extract_relevant_excerpt(doc: str, keywords: list[str], window: int = 120):
+    clean_doc = " ".join(doc.split())  # 줄바꿈/공백 정리
+
+    for kw in keywords:
+        idx = clean_doc.find(kw)
+        if idx != -1:
+            start = max(0, idx - window)
+            end = min(len(clean_doc), idx + window)
+            return clean_doc[start:end]
+
+    return clean_doc[:200]  # 키워드 못 찾으면 앞부분 반환
+
+def infer_requested_fields(question: str) -> list[str]:
+    # “항목” 후보 사전(프로젝트에서 자주 쓰는 값들)
+    field_keywords = [
+        "대표이사", "CEO",
+        "총자산", "자산",
+        "매출", "매출액", "매출액은",
+        "영업이익",
+        "당기순이익", "순이익",
+        "임직원", "직원", "인원",
+        "근속", "평균 근속", "근속연수",
+    ]
+
+    q = question.replace("?", " ").replace(",", " ")
+    hits = []
+    for k in field_keywords:
+        if k in q and k not in hits:
+            hits.append(k)
+    return hits
+
 
 @app.post("/rag/ask", response_model=RAGAnswerResponse)
 def ask_rag(req: RAGRequest):
 
-    docs, metas, dists = search(req.question, k=3)
+    docs, metas, dists = search(req.question, k=8)
 
     # -------------------------------
     # 키워드 폴백: 벡터 검색이 약할 때(거리 큼) 키워드 포함 chunk를 우선 사용
@@ -31,7 +63,7 @@ def ask_rag(req: RAGRequest):
     best_dist = min(dists) if dists else None
 
     # 질문에서 아주 간단히 키워드 뽑기(기본형)
-    keywords = ["대표이사", "영업이익", "매출", "총자산"]
+    keywords = ["대표이사", "영업이익", "매출", "총자산", "자산"]
     for token in req.question.replace("?", " ").replace(",", " ").split():
         # 너무 짧은 토큰은 제외(노이즈 방지)
         if len(token) >= 2:
@@ -63,26 +95,31 @@ def ask_rag(req: RAGRequest):
 
     # 여기부터는 기존 코드
     context_docs = [doc for doc, _, _ in filtered]
-    answer = rag_answer(req.question, "\n\n".join(context_docs))
+    context = "\n\n".join(context_docs)
+
+    # LLM이 answer + summary_3lines 생성
+    llm_out = rag_answer_with_summary(req.question, context)
+
+    filtered_for_cite = [(doc, meta, dist) for (doc, meta, dist) in filtered if any(k in doc for k in keywords)]
+
+    if not filtered_for_cite:
+        filtered_for_cite = filtered
 
     citations = []
-    for i, (doc, meta, _) in enumerate(filtered, start=1):
+    for i, (doc, meta, _) in enumerate(filtered_for_cite[:3], start=1):
+        excerpt = extract_relevant_excerpt(doc, keywords)
         citations.append({
             "id": i,
             "source": meta.get("source", ""),
             "page": meta.get("page", ""),
-            "excerpt": doc[:300]
+            "excerpt": excerpt
         })
 
     return {
         "question": req.question,
-        "answer": answer,
-        "summary_3lines": [
-            "요약 1",
-            "요약 2",
-            "요약 3",
-        ],
-        "citations": citations,
+        "answer": llm_out.answer,
+        "summary_3lines": llm_out.summary_3lines,
+        "citations": citations
     }
 
 
