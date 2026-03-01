@@ -7,9 +7,9 @@ from app.rag.pdf_loader import load_pdf_by_page
 from app.rag.store import add_documents, search, split_text
 from app.service import summarize, rag_answer
 from app.config import RAG_DIST_THRESHOLD
+from app.schemas import RAGRequest, RAGAnswerResponse
 
-from pydantic import BaseModel
-
+import os
 
 app = FastAPI(title="Week1 AI Agent")
 
@@ -20,47 +20,71 @@ class RAGRequest(BaseModel):
     question: str
 
 
-from app.service import rag_answer
-
-@app.post("/rag/ask")
+@app.post("/rag/ask", response_model=RAGAnswerResponse)
 def ask_rag(req: RAGRequest):
 
     docs, metas, dists = search(req.question, k=3)
 
-    filtered = [
-        (doc, meta, dist)
-        for doc, meta, dist in zip(docs, metas, dists)
-        if dist <= RAG_DIST_THRESHOLD
-    ]
+    # -------------------------------
+    # 키워드 폴백: 벡터 검색이 약할 때(거리 큼) 키워드 포함 chunk를 우선 사용
+    # -------------------------------
+    best_dist = min(dists) if dists else None
 
-    if not filtered:
+    # 질문에서 아주 간단히 키워드 뽑기(기본형)
+    keywords = ["대표이사", "영업이익", "매출", "총자산"]
+    for token in req.question.replace("?", " ").replace(",", " ").split():
+        # 너무 짧은 토큰은 제외(노이즈 방지)
+        if len(token) >= 2:
+            keywords.append(token)
+
+    # 벡터 검색이 애매할 때만(예: best_dist가 큰 경우) 폴백
+    if best_dist is not None and best_dist > 1.6:
+        keyword_hits = []
+        for doc, meta, dist in zip(docs, metas, dists):
+            if any(k in doc for k in keywords):
+                keyword_hits.append((doc, meta, dist))
+
+        # 키워드로라도 잡히면 그 결과를 사용
+        if keyword_hits:
+            filtered = keyword_hits
+        else:
+            filtered = list(zip(docs, metas, dists))
+    else:
+        filtered = list(zip(docs, metas, dists))
+
+    # (선택) 근거가 너무 약하면 거절 (LLM 환각 방지)
+    RAG_DIST_THRESHOLD = float(os.getenv("RAG_DIST_THRESHOLD", "2.0"))
+    if (best_dist is None) or (best_dist > RAG_DIST_THRESHOLD):
         return {
             "question": req.question,
             "answer": "문서에서 해당 질문과 직접 관련된 근거를 찾지 못했습니다.",
             "citations": []
         }
 
-    # 필터된 것만 사용
-    docs = [x[0] for x in filtered]
-    metas = [x[1] for x in filtered]
-
-    context = "\n\n".join(docs)
-    answer = rag_answer(req.question, context)
+    # 여기부터는 기존 코드
+    context_docs = [doc for doc, _, _ in filtered]
+    answer = rag_answer(req.question, "\n\n".join(context_docs))
 
     citations = []
-    for i, (doc, meta) in enumerate(zip(docs, metas), start=1):
+    for i, (doc, meta, _) in enumerate(filtered, start=1):
         citations.append({
             "id": i,
-            "source": meta["source"],
-            "page": meta["page"],
-            "excerpt": doc.replace("\n", " ").strip()[:200]
+            "source": meta.get("source", ""),
+            "page": meta.get("page", ""),
+            "excerpt": doc[:300]
         })
 
     return {
         "question": req.question,
         "answer": answer,
-        "citations": citations
+        "summary_3lines": [
+            "요약 1",
+            "요약 2",
+            "요약 3",
+        ],
+        "citations": citations,
     }
+
 
 
 @app.post("/agent/run")
